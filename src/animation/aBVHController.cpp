@@ -52,11 +52,23 @@ void BVHController::setActor(AActor* actor)
 
 void BVHController::update(double time, bool updateRootXZTranslation)
 {
-	// TODO: Given the current value of time, 
+	// Given the current value of time, 
 	// 1. set the local transforms at each Skeleton joint using the cached spline data in member variables mRootMotion and mMotion 
+	AJoint* root = mSkeleton->getRootNode();
+	vec3 rootTranslation = mRootMotion.getValue(time);
+	if (!updateRootXZTranslation) {
+		rootTranslation = vec3(0.0, rootTranslation[1], 0.0);
+	}
+	root->setLocalTranslation(rootTranslation);
+
+	for (unsigned int i = 0; i < mSkeleton->getNumJoints(); i++) {
+		AJoint* joint = mSkeleton->getJointByID(i);
+		quat q = mMotion[i].getCachedValue(time);
+		joint->setLocalRotation(q.ToRotation());
+	}
 	// 2. update the joint transforms of the full skeleton in order to compute the global transforms at each joint
 	// Hint: the root can both rotate and translate (i.e. has 6 DOFs) while all the other joints just rotate 
-
+	mSkeleton->update();
 }
 
 bool BVHController::load(const std::string& filename)

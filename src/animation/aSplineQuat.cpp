@@ -120,17 +120,25 @@ void ASplineQuat::computeControlPoints(quat& startQuat, quat& endQuat)
 	int numKeys = mKeys.size();
 	if (numKeys <= 1) return;
 
-	quat b0, b1, b2, b3;
-	quat q_1, q0, q1, q2;
-
 	for (int segment = 0; segment < numKeys - 1; segment++)
 	{
-		// TODO: student implementation goes here
-		//  Given the quaternion keys q_1, q0, q1 and q2 associated with a curve segment, compute b0, b1, b2, b3 
-		//  for each cubic quaternion curve, then store the results in mCntrlPoints in same the same way 
-		//  as was used with the SplineVec implementation
-		//  Hint: use the SDouble, SBisect and Slerp to compute b1 and b2
+		quat b0 = mKeys[segment].second;
+		quat b3 = mKeys[segment + 1].second;
+		quat b1, b2, qPrime, qStar;
 
+		qPrime = segment != 0
+			? quat::SDouble(mKeys[segment - 1].second, b0)
+			: quat::SDouble(startQuat, b0);
+		
+		qStar = quat::SBisect(qPrime, b3);
+		b1 = quat::Slerp(b0, qStar, double(1.0 / 3.0));
+
+		qPrime = segment != numKeys - 2
+			? quat::SDouble(mKeys[segment + 2].second, b3)
+			: quat::SDouble(endQuat, b3);
+
+		qStar = quat::SBisect(b0, qPrime);
+		b2 = quat::Slerp(b3, qStar, double(1.0 / 3.0));
 
 		mCtrlPoints.push_back(b0);
 		mCtrlPoints.push_back(b1);
@@ -141,12 +149,10 @@ void ASplineQuat::computeControlPoints(quat& startQuat, quat& endQuat)
 
 quat ASplineQuat::getLinearValue(double t)
 {
-
-	quat q;
 	int segment = getCurveSegment(t);
 
-	// TODO: student implementation goes here
-	// compute the value of a linear quaternion spline at the value of t using slerp
+	double u = (t - mKeys[segment].first) / (mKeys[segment + 1].first - mKeys[segment].first);
+	quat q = quat::Slerp(mKeys[segment].second, mKeys[segment + 1].second, u);
 
 	return q;	
 }
@@ -170,11 +176,15 @@ void ASplineQuat::createSplineCurveLinear()
 
 quat ASplineQuat::getCubicValue(double t)
 {
-	quat q, b0, b1, b2, b3;
 	int segment = getCurveSegment(t);
 
-	// TODO: student implementation goes here
-	// compute the value of a cubic quaternion spline at the value of t using Scubic
+	quat b0 = mCtrlPoints[4 * segment];
+	quat b1 = mCtrlPoints[4 * segment + 1];
+	quat b2 = mCtrlPoints[4 * segment + 2];
+	quat b3 = mCtrlPoints[4 * segment + 3];
+	double u = (t - mKeys[segment].first) / (mKeys[segment + 1].first - mKeys[segment].first);
+	
+	quat q = quat::Scubic(b0, b1, b2, b3, u);
 
 	return q;
 }
