@@ -129,11 +129,31 @@ void IKController::setActor(AActor* actor)
 
 AIKchain IKController::createIKchain(int endJointID, int desiredChainSize, ASkeleton* pSkeleton)
 {
-	// TODO: given the end joint ID and the desired length of the IK chain, 
+	// Given the end joint ID and the desired length of the IK chain, 
 	// add the corresponding skeleton joint pointers to the AIKChain "chain" data member starting with the end joint
 	// desiredChainSize = -1 should create an IK chain of maximum length (where the last chain joint is the joint before the root joint)
 	// also add weight values to the associated AIKChain "weights" data member which can be used in a CCD IK implemention
-	return AIKchain();
+	
+	std::vector<AJoint*> chain;
+	std::vector<double> weights;
+	bool createMaxLength = desiredChainSize == -1;
+
+	AJoint* joint = pSkeleton->getJointByID(endJointID);
+	while (joint != pSkeleton->getRootNode()) {
+		chain.push_back(joint);
+		weights.push_back(0.1);
+		joint = joint->getParent();
+		desiredChainSize--;
+
+		if (!createMaxLength && desiredChainSize == 0) {
+			break;
+		}
+	}
+
+	AIKchain IKchain = AIKchain();
+	IKchain.setChain(chain);
+	IKchain.setWeights(weights);
+	return IKchain;
 }
 
 
@@ -145,9 +165,10 @@ bool IKController::IKSolver_Limb(int endJointID, const ATarget& target)
 	// copy transforms from base skeleton
 	mIKSkeleton.copyTransforms(m_pSkeleton);
 
-	if (!mvalidLimbIKchains || createLimbIKchains())
+	if (!mvalidLimbIKchains)
 	{
-		return false;
+		mvalidLimbIKchains = createLimbIKchains();
+		assert(mvalidLimbIKchains);
 	}
 
 	vec3 desiredRootPosition;
@@ -231,9 +252,36 @@ int IKController::createLimbIKchains()
 
 int IKController::computeLimbIK(ATarget target, AIKchain& IKchain, const vec3 midJointAxis, ASkeleton* pIKSkeleton)
 {
-	// TODO: Implement the analytic/geometric IK method assuming a three joint limb  
+	// Implement the analytic/geometric IK method assuming a three joint limb  
 	// The actual position of the end joint should match the target position within some episilon error 
 	// the variable "midJointAxis" contains the rotation axis for the middle joint
+	
+	m_pEndJoint = IKchain.getJoint(0);
+	m_pMiddleJoint = IKchain.getJoint(1);
+	m_pBaseJoint = IKchain.getJoint(2);
+
+	// Step 1: Compute angle at middle joint to get desired value of rd
+	vec3 vec2Target = target.getGlobalTranslation() - m_pBaseJoint->getGlobalTranslation();
+	double rd = vec2Target.Length();
+	double l1 = m_pMiddleJoint->getLocalTranslation().Length();
+	double l2 = m_pEndJoint->getLocalTranslation().Length();
+	double cosPhi = (l1 * l1 + l2 * l2 - rd * rd) / (2.0 * l1 * l2);
+	double phi = cosPhi > 1.0 - DBL_EPSILON ? 0.0 : cosPhi < -1.0 + DBL_EPSILON ? M_PI : acos(cosPhi);
+	double theta2 = M_PI - phi;
+	
+	m_pMiddleJoint->setLocalRotation(mat3::Rotation3D(midJointAxis, theta2));
+	m_pMiddleJoint->updateTransform();
+
+	// Step 2: Compute quaternion at base joint to orient rd so it points at target
+	vec3 vec2EndJoint = m_pEndJoint->getGlobalTranslation() - m_pBaseJoint->getGlobalTranslation();
+	double cosTheta1 = Dot(vec2Target, vec2EndJoint) / (vec2Target.Length() * vec2EndJoint.Length());
+	double theta1 = cosTheta1 > 1.0 - DBL_EPSILON ? 0.0 : cosTheta1 < -1.0 + DBL_EPSILON ? M_PI : acos(cosTheta1);
+	vec3 axis = vec2EndJoint.Cross(vec2Target).Normalize();
+	vec3 localAxis = (m_pBaseJoint->getGlobalRotation().Transpose() * axis).Normalize();
+
+	m_pBaseJoint->setLocalRotation(m_pBaseJoint->getLocalRotation() * mat3::Rotation3D(localAxis, theta1));
+	m_pBaseJoint->updateTransform();
+
 	return true;
 }
 
@@ -306,7 +354,6 @@ int IKController::createCCDIKchains()
 
 	int desiredChainSize = -1;  // default of -1 creates IK chain of maximum length from end joint to child joint of root
 
-
 	// create IK chains for Lhand, Rhand, Lfoot and Rfoot 
 	mLhandIKchain = createIKchain(mLhandID, desiredChainSize, &mIKSkeleton);
 	mRhandIKchain = createIKchain(mRhandID, desiredChainSize, &mIKSkeleton);
@@ -331,17 +378,38 @@ int IKController::createCCDIKchains()
 
 int IKController::computeCCDIK(ATarget target, AIKchain& IKchain, ASkeleton* pIKSkeleton)
 {
-
-	// TODO: Implement CCD IK  
+	// Implement CCD IK  
 	// The actual position of the end joint should match the desiredEndPos within some episilon error 
 
+	unsigned int numIteration = 3;
+	ATarget mTarget = target;
+	AJoint* endJoint = IKchain.getJoint(0);
+	double error;
 
-	//Hint:
-	// 1. compute axis and angle for a joint in the IK chain (distal to proximal) in global coordinates
-	// 2. once you have the desired axis and angle, convert axis to local joint coords 
-	// 3. compute desired change to local rotation matrix
-	// 4. set local rotation matrix to new value
-	// 5. update transforms for joint and all children
+	for (unsigned int i = 0; i < numIteration; i++) {
+		for (unsigned int j = 1; j < IKchain.getSize(); j++) {
+			AJoint* joint = IKchain.getJoint(j);
+			vec3 radius = endJoint->getGlobalTranslation() - joint->getGlobalTranslation();
+			vec3 error = target.getGlobalTranslation() - endJoint->getGlobalTranslation();
+
+			// 1. compute axis and angle for a joint in the IK chain (distal to proximal) in global coordinates
+			double angle = 0.2 * (radius.Cross(error)).Length() / (Dot(radius, radius) + Dot(radius, error));
+			vec3 axis = radius.Cross(error).Normalize();
+
+			// 2. once you have the desired axis and angle, convert axis to local joint coords 
+			vec3 localAxis = (joint->getGlobalRotation().Transpose() * axis).Normalize();
+
+			// 3. compute desired change to local rotation matrix
+			mat3 rotation = joint->getLocalRotation() * mat3::Rotation3D(localAxis, angle);
+
+			// 4. set local rotation matrix to new value
+			joint->setLocalRotation(rotation);
+
+			// 5. update transforms for joint and all children
+			joint->updateTransform();
+		}
+	}
+
 	return true;
 }
 
@@ -350,6 +418,7 @@ bool IKController::IKSolver_PseudoInv(int endJointID, const ATarget& target)
 {
 	// TODO: Implement Pseudo Inverse-based IK  
 	// The actual position of the end joint should match the target position after the skeleton is updated with the new joint angles
+
 	return true;
 }
 
